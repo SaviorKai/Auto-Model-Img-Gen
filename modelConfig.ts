@@ -57,7 +57,9 @@ export const MODEL_CONFIG: Record<string, any> = {
         supports: {
             contrast: true,
             aspectRatios: Object.keys(ASPECT_RATIO_DIMENSIONS),
-            guidance: {}
+            guidance: {
+                'Context Images': { maxInputs: 6, apiFormat: 'contextImages' }
+            }
         },
         defaults: {
             strength: 0.6,
@@ -70,7 +72,9 @@ export const MODEL_CONFIG: Record<string, any> = {
         supports: {
             contrast: true,
             aspectRatios: Object.keys(ASPECT_RATIO_DIMENSIONS),
-            guidance: {},
+            guidance: {
+                'Context Images': { maxInputs: 6, apiFormat: 'contextImages' }
+            },
             promptEnhance: true
         },
         defaults: {

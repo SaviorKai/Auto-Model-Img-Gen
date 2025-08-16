@@ -7,6 +7,15 @@ import { GoogleGenAI } from "@google/genai";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+interface ReferenceImage {
+  id: string;
+  file: File;
+  url: string;
+  uploadedId?: string; // Leonardo API ID after upload
+  isUploading: boolean;
+  uploadError?: string;
+}
+
 interface GenerationJob {
   id: string;
   prompt: string;
@@ -20,6 +29,7 @@ interface GenerationJob {
   actualModel?: string; // The model that was actually selected by Auto
   aspectRatio: string;
   needsEnhancement: boolean; // Flag to indicate if enhancement is needed
+  referenceImages?: ReferenceImage[]; // Store reference images used
 }
 
 const App: React.FC = () => {
@@ -28,6 +38,7 @@ const App: React.FC = () => {
   const [generationJobs, setGenerationJobs] = useState<GenerationJob[]>([]);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [geminiApiKey, setGeminiApiKey] = useState<string | null>(null);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   
   // Settings state  
   const [selectedModel, setSelectedModel] = useState<string>('Auto');
@@ -48,6 +59,19 @@ const App: React.FC = () => {
   
   // Refs
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize textarea function
+  const autoResizeTextarea = useCallback(() => {
+    if (promptInputRef.current) {
+      promptInputRef.current.style.height = '48px'; // Reset to minimum
+      promptInputRef.current.style.height = `${Math.max(48, promptInputRef.current.scrollHeight)}px`;
+    }
+  }, []);
+
+  // Auto-resize textarea when prompt changes
+  useEffect(() => {
+    autoResizeTextarea();
+  }, [prompt, autoResizeTextarea]);
 
   // Functions
   const loadSecretsFromFile = async (): Promise<{ leonardoKey?: string; geminiKey?: string; hasFile: boolean }> => {
@@ -84,6 +108,266 @@ const App: React.FC = () => {
       // File doesn't exist or can't be read
     }
     return { hasFile: false };
+  };
+
+  // Image Reference Functions
+  const uploadImageToLeonardo = async (file: File): Promise<string> => {
+    console.log(`Starting upload for file: ${file.name}, size: ${file.size}, type: ${file.type}`);
+    
+    if (!apiKey) {
+      console.error("API key not set");
+      throw new Error("API key not set");
+    }
+
+    // Convert file to base64 for direct API upload (workaround for CORS issues)
+    const convertToBase64 = (file: File): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Remove the data:image/jpeg;base64, prefix
+          const base64 = result.split(',')[1];
+          resolve(base64);
+        };
+        reader.onerror = error => reject(error);
+      });
+    };
+
+    try {
+      console.log('Converting image to base64...');
+      const base64Data = await convertToBase64(file);
+      console.log(`Base64 conversion complete, length: ${base64Data.length}`);
+      
+      // Try direct upload via Leonardo API with base64
+      console.log('Attempting direct base64 upload to Leonardo API...');
+      const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+      
+      const uploadResponse = await fetch('https://cloud.leonardo.ai/api/rest/v1/upload-init-image', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          extension: extension,
+          imageDataUrl: `data:${file.type};base64,${base64Data}`
+        })
+      });
+
+      console.log(`Direct upload response status: ${uploadResponse.status}`);
+
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        console.error(`Direct upload failed: ${uploadResponse.status} - ${errorText}`);
+        
+        // Fallback to the original presigned URL method
+        console.log('Direct upload failed, trying presigned URL method...');
+        return await uploadViaPresignedUrl(file);
+      }
+
+      const uploadData = await uploadResponse.json();
+      console.log('Direct upload response:', uploadData);
+      
+      if (uploadData.uploadInitImageByUrl && uploadData.uploadInitImageByUrl.id) {
+        const imageId = uploadData.uploadInitImageByUrl.id;
+        console.log(`Direct upload successful! Image ID: ${imageId}`);
+        return imageId;
+      } else {
+        console.error('Invalid direct upload response structure:', uploadData);
+        throw new Error('Invalid response from direct upload');
+      }
+      
+    } catch (error) {
+      console.error('Direct upload error:', error);
+      console.log('Falling back to presigned URL method...');
+      return await uploadViaPresignedUrl(file);
+    }
+  };
+
+  // Fallback method using presigned URLs (original implementation)
+  const uploadViaPresignedUrl = async (file: File): Promise<string> => {
+    console.log('Using presigned URL upload method...');
+    
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+    console.log(`Requesting upload URL for extension: ${extension}`);
+    
+    const initResponse = await fetch('https://cloud.leonardo.ai/api/rest/v1/init-image', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({ extension })
+    });
+
+    console.log(`Init response status: ${initResponse.status}`);
+
+    if (!initResponse.ok) {
+      const errorText = await initResponse.text();
+      console.error(`Init request failed: ${initResponse.status} - ${errorText}`);
+      throw new Error(`Failed to request upload URL (${initResponse.status}): ${errorText}`);
+    }
+
+    const initData = await initResponse.json();
+    console.log('Init response data:', initData);
+    
+    const { uploadInitImage } = initData;
+    if (!uploadInitImage) {
+      console.error('Invalid init response structure:', initData);
+      throw new Error('Invalid response structure from Leonardo API');
+    }
+    
+    const { id, url: uploadUrl, fields: fieldsString } = uploadInitImage;
+    if (!id || !uploadUrl || !fieldsString) {
+      console.error('Missing required fields in uploadInitImage:', uploadInitImage);
+      throw new Error('Missing required fields in Leonardo API response');
+    }
+    
+    // Parse the fields JSON string
+    let fields;
+    try {
+      fields = JSON.parse(fieldsString);
+    } catch (error) {
+      console.error('Failed to parse fields JSON:', fieldsString);
+      throw new Error('Invalid fields format in Leonardo API response');
+    }
+
+    console.log(`Upload URL received, uploading to: ${uploadUrl}`);
+
+    // Create FormData with CORS headers disabled
+    const formData = new FormData();
+    Object.entries(fields).forEach(([key, value]) => {
+      formData.append(key, value as string);
+    });
+    formData.append('file', file);
+
+    console.log('Attempting CORS-disabled upload...');
+    
+    try {
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        body: formData,
+        mode: 'no-cors', // Try no-cors mode
+      });
+
+      console.log(`No-CORS upload response status: ${uploadResponse.status}`);
+      
+      // In no-cors mode, we can't read the response, but if no error was thrown, assume success
+      if (uploadResponse.type === 'opaque') {
+        console.log('No-CORS upload appears successful (opaque response)');
+        return id;
+      }
+      
+      throw new Error('No-CORS upload failed');
+      
+    } catch (corsError) {
+      console.error('CORS upload failed:', corsError);
+      throw new Error(`Upload failed due to CORS restrictions: ${(corsError as Error).message}`);
+    }
+  };
+
+  const addReferenceImage = async (file: File) => {
+    console.log(`Adding reference image: ${file.name}`);
+    
+    if (referenceImages.length >= 6) {
+      alert('Maximum 6 reference images allowed');
+      return;
+    }
+
+    const imageId = `ref-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const imageUrl = URL.createObjectURL(file);
+    
+    const newImage: ReferenceImage = {
+      id: imageId,
+      file,
+      url: imageUrl,
+      isUploading: true
+    };
+
+    setReferenceImages(prev => [...prev, newImage]);
+
+    try {
+      console.log(`Starting upload for image ${imageId}`);
+      const uploadedId = await uploadImageToLeonardo(file);
+      console.log(`Upload completed for image ${imageId}, Leonardo ID: ${uploadedId}`);
+      
+      setReferenceImages(prev => prev.map(img => 
+        img.id === imageId 
+          ? { ...img, uploadedId, isUploading: false }
+          : img
+      ));
+    } catch (error) {
+      console.error(`Upload failed for image ${imageId}:`, error);
+      const errorMessage = (error as Error).message;
+      
+      setReferenceImages(prev => prev.map(img => 
+        img.id === imageId 
+          ? { ...img, isUploading: false, uploadError: errorMessage }
+          : img
+      ));
+      
+      // Also show an alert for immediate user feedback
+      alert(`Failed to upload ${file.name}: ${errorMessage}`);
+    }
+  };
+
+  const removeReferenceImage = (imageId: string) => {
+    setReferenceImages(prev => {
+      const imageToRemove = prev.find(img => img.id === imageId);
+      if (imageToRemove) {
+        URL.revokeObjectURL(imageToRemove.url);
+      }
+      return prev.filter(img => img.id !== imageId);
+    });
+  };
+
+  const handleImageDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter(file => file.type.startsWith('image/'));
+    
+    imageFiles.forEach(file => {
+      if (file.size > 10 * 1024 * 1024) { // 10MB limit
+        alert(`File ${file.name} is too large. Maximum size is 10MB.`);
+        return;
+      }
+      addReferenceImage(file);
+    });
+  }, [referenceImages.length]);
+
+  const handleImagePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItems = items.filter(item => item.type.startsWith('image/'));
+    
+    imageItems.forEach(item => {
+      const file = item.getAsFile();
+      if (file) {
+        addReferenceImage(file);
+      }
+    });
+  }, [referenceImages.length]);
+
+  // Get image guidance configuration for a model
+  const getImageGuidanceConfig = (modelName: string) => {
+    const guidanceMap: Record<string, { styleRef?: number; charRef?: number; contentRef?: number }> = {
+      // Note: FLUX.1 Kontext and FLUX.1 Kontext Pro use contextImages instead of controlnets
+      'Flux Dev (Precision)': { styleRef: 299, contentRef: 233 },
+      'Flux Schnell (Speed)': { styleRef: 298, contentRef: 232 },
+      'Leonardo Phoenix 1.0': { styleRef: 166, charRef: 397, contentRef: 364 },
+      'Leonardo Phoenix 0.9': { styleRef: 166, charRef: 397, contentRef: 364 },
+      'Leonardo Lightning XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'Leonardo Anime XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'Leonardo Diffusion XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'Leonardo Kino XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'Leonardo Vision XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'SDXL 1.0': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'AlbedoBase XL': { styleRef: 67, charRef: 133, contentRef: 100 },
+      'Lucid Realism': { styleRef: 431 }, // Only style reference
+      'Lucid Origin': { styleRef: 431, contentRef: 430 }
+    };
+    
+    return guidanceMap[modelName] || {};
   };
 
   // Effects
@@ -248,7 +532,8 @@ If the user's prompt requires text to be added / rendered in the image, use 'Flu
       model: selectedModel,
       actualModel: selectedModel === 'Auto' ? undefined : selectedModel,
       aspectRatio: aspectRatio,
-      needsEnhancement: needsEnhancement
+      needsEnhancement: needsEnhancement,
+      referenceImages: referenceImages.length > 0 ? [...referenceImages] : undefined
     };
     
     setGenerationJobs(prev => [newJob, ...prev]);
@@ -337,6 +622,73 @@ If the user's prompt requires text to be added / rendered in the image, use 'Flu
 
         if (style && style !== 'None') {
           payload.presetStyle = style.toUpperCase().replace(/ /g, '_');
+        }
+
+        // Add image guidance if reference images are available
+        const uploadedImages = referenceImages.filter(img => img.uploadedId && !img.isUploading);
+        if (uploadedImages.length > 0) {
+          // Flux Kontext models use contextImages instead of controlnets
+          if (actualModelToUse === 'FLUX.1 Kontext' || actualModelToUse === 'FLUX.1 Kontext Pro') {
+            const contextImages: any[] = [];
+            uploadedImages.forEach((img, index) => {
+              contextImages.push({
+                type: "UPLOADED",
+                id: img.uploadedId
+              });
+              // Flux Kontext supports multiple context images
+              if (contextImages.length >= 6) return;
+            });
+            
+            if (contextImages.length > 0) {
+              payload.contextImages = contextImages;
+            }
+          } else {
+            // Standard controlnets for other models
+            const guidanceConfig = getImageGuidanceConfig(actualModelToUse);
+            const controlnets: any[] = [];
+            
+            // Determine which guidance type to use based on model capabilities and Lucid Realism rule
+            let guidanceType: 'styleRef' | 'contentRef' | 'charRef' = 'styleRef';
+            let preprocessorId: number | undefined = guidanceConfig.styleRef;
+            
+            if (actualModelToUse === 'Lucid Realism') {
+              // Lucid Realism: only use Style Reference
+              guidanceType = 'styleRef';
+              preprocessorId = guidanceConfig.styleRef;
+            } else if (guidanceConfig.styleRef) {
+              // For other models, prefer Style Reference if available
+              guidanceType = 'styleRef';
+              preprocessorId = guidanceConfig.styleRef;
+            } else if (guidanceConfig.contentRef) {
+              guidanceType = 'contentRef';
+              preprocessorId = guidanceConfig.contentRef;
+            }
+            
+            if (preprocessorId) {
+              uploadedImages.forEach((img, index) => {
+                const controlnet: any = {
+                  initImageId: img.uploadedId,
+                  initImageType: "UPLOADED",
+                  preprocessorId: preprocessorId,
+                  strengthType: "Mid", // Default to Mid strength
+                };
+                
+                // Only add weight for models that support it (exclude Lucid models and others that only use strengthType)
+                if (!actualModelToUse.includes('Lucid') && !actualModelToUse.includes('Kino')) {
+                  controlnet.weight = 1.0;
+                }
+                
+                controlnets.push(controlnet);
+                
+                // Limit based on model capabilities
+                if (controlnets.length >= 6) return;
+              });
+              
+              if (controlnets.length > 0) {
+                payload.controlnets = controlnets;
+              }
+            }
+          }
         }
 
         const genResponse = await fetch('https://cloud.leonardo.ai/api/rest/v1/generations', {
@@ -585,32 +937,225 @@ If the user's prompt requires text to be added / rendered in the image, use 'Flu
             <label className="leo-text-sm leo-font-medium leo-text-secondary">
               Describe what you want to generate
             </label>
-            <div style={{ position: 'relative' }}>
+            {/* Unified Prompt Box Container */}
+            <div 
+              style={{ 
+                border: '1px solid var(--color-border-input-default)',
+                borderRadius: '8px',
+                backgroundColor: 'var(--color-surface-input-default)',
+                overflow: 'hidden',
+                transition: 'border-color 0.15s ease'
+              }}
+              onDrop={handleImageDrop}
+              onDragOver={(e) => e.preventDefault()}
+              onDragEnter={(e) => e.preventDefault()}
+            >
+              {/* Row 1: Prompt Textarea */}
               <textarea
                 ref={promptInputRef}
                 value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
+                onChange={(e) => {
+                  setPrompt(e.target.value);
+                  // Auto-resize on next frame to ensure content is rendered
+                  requestAnimationFrame(() => autoResizeTextarea());
+                }}
                 onKeyPress={handleKeyPress}
+                onPaste={handleImagePaste}
                 placeholder="A majestic dragon soaring through a cloudy sky at sunset..."
-                className="leo-textarea"
-                style={{ height: '96px', paddingRight: '100px' }}
+                style={{ 
+                  width: '100%',
+                  minHeight: '48px',
+                  height: '48px',
+                  resize: 'none',
+                  border: 'none',
+                  outline: 'none',
+                  backgroundColor: 'transparent',
+                  padding: '16px',
+                  fontSize: '14px',
+                  overflow: 'hidden',
+                  lineHeight: '1.5',
+                  fontFamily: 'inherit',
+                  color: 'var(--color-content-primary)'
+                }}
                 disabled={isLoading}
               />
+              
+              {/* Row 2: Action Bar with Images */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'flex-end',
+                gap: '8px',
+                padding: '16px 20px 8px 12px',
+                borderTop: '1px solid var(--color-border-input-subtle)',
+                backgroundColor: 'var(--color-surface-input-subtle)',
+                minHeight: '40px',
+                overflow: 'visible'
+              }}>
+              {/* Add Image Button */}
+              <button
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.accept = 'image/*';
+                  input.multiple = true;
+                  input.onchange = (e) => {
+                    const files = Array.from((e.target as HTMLInputElement).files || []);
+                    files.forEach(file => {
+                      if (file.size > 10 * 1024 * 1024) {
+                        alert(`File ${file.name} is too large. Maximum size is 10MB.`);
+                        return;
+                      }
+                      addReferenceImage(file);
+                    });
+                  };
+                  input.click();
+                }}
+                disabled={referenceImages.length >= 6}
+                className="leo-button leo-button-secondary leo-button-sm"
+                style={{
+                  width: referenceImages.length > 0 ? '48px' : '32px',
+                  height: referenceImages.length > 0 ? '48px' : '32px',
+                  minWidth: referenceImages.length > 0 ? '48px' : '32px',
+                  flexShrink: 0,
+                  padding: '0',
+                  alignSelf: 'flex-end'
+                }}
+                title={referenceImages.length >= 6 ? "Maximum 6 images allowed" : "Add reference image"}
+              >
+<svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+              </button>
+              
+              {/* Reference Images */}
+              {referenceImages.length > 0 && (
+                <div style={{
+                  display: 'flex',
+                  gap: '6px',
+                  flex: 1,
+                  alignItems: 'flex-end',
+                  paddingTop: '8px',
+                  paddingRight: '12px'
+                }}>
+                  {referenceImages.map((img) => (
+                    <div key={img.id} style={{
+                      position: 'relative',
+                      width: '48px',
+                      height: '48px',
+                      borderRadius: '6px',
+                      overflow: 'hidden',
+                      border: '1px solid var(--color-border-input-default)',
+                      backgroundColor: 'white',
+                      flexShrink: 0
+                    }}>
+                      <img
+                        src={img.url}
+                        alt={`Reference ${img.file.name}`}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover'
+                        }}
+                      />
+                      
+                      {/* Upload Status Overlays */}
+                      {img.isUploading && (
+                        <div style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'white'
+                        }}>
+                          <div className="leo-spinner" style={{ width: '12px', height: '12px' }}></div>
+                        </div>
+                      )}
+                      
+                      {img.uploadError && (
+                        <div 
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            backgroundColor: 'rgba(228, 78, 68, 0.9)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white'
+                          }}
+                          title={`Upload failed: ${img.uploadError}`}
+                        >
+                          <svg width="12" height="12" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
+                      
+                      
+                      {/* Remove Button */}
+                      <button
+                        onClick={() => removeReferenceImage(img.id)}
+                        style={{
+                          position: 'absolute',
+                          top: '2px',
+                          right: '2px',
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          backgroundColor: '#000000',
+                          border: '1px solid white',
+                          color: 'white',
+                          fontSize: '10px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)'
+                        }}
+                        title={`Remove ${img.file.name}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  
+                </div>
+              )}
+              
+              {/* Generate Button */}
               <button
                 onClick={handleGenerate}
                 disabled={!prompt.trim() || isButtonDisabled}
                 className={`leo-button leo-button-sm ${!prompt.trim() || isButtonDisabled ? 'leo-button-ghost' : 'leo-button-primary'}`}
                 style={{
-                  position: 'absolute',
-                  bottom: '12px',
-                  right: '12px'
+                  marginLeft: 'auto',
+                  minWidth: '80px',
+                  height: '32px',
+                  fontSize: '13px',
+                  flexShrink: 0
                 }}
               >
                 Generate
               </button>
+              </div>
             </div>
-            <p className="leo-text-xs leo-text-secondary" style={{ minHeight: '1.125rem' }}>
-              {!isLoading && <span>Press Enter to generate • Shift + Enter for new line</span>}
+            
+            <p className="leo-text-xs leo-text-secondary" style={{ minHeight: '1.125rem', marginTop: '8px' }}>
+              {!isLoading && (
+                <span>
+                  Press Enter to generate • Shift + Enter for new line
+                  {referenceImages.length === 0 && " • Drag/drop or paste images for reference"}
+                  {referenceImages.length > 0 && ` • ${referenceImages.length}/6 reference images`}
+                </span>
+              )}
               {hasActiveGenerations && (
                 <span className="leo-text-highlight">
                   {generationJobs.filter(job => job.status === 'loading' || job.status === 'enhancing').length} generation(s) in progress...
@@ -674,6 +1219,11 @@ If the user's prompt requires text to be added / rendered in the image, use 'Flu
                             <span className="leo-badge leo-badge-primary">
                               {job.aspectRatio}
                             </span>
+                            {job.referenceImages && job.referenceImages.length > 0 && (
+                              <span className="leo-badge leo-badge-tertiary" title={`${job.referenceImages.length} reference images`}>
+                                🖼️ {job.referenceImages.length}
+                              </span>
+                            )}
                             {job.status === 'enhancing' && (
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <div className="leo-spinner"></div>
