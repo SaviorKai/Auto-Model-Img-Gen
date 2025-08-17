@@ -10,6 +10,7 @@ Detailed Guidelines:
 2. Respect User-Specified Attributes:
    - When the user specifies details such as race, gender, age, skin color, or group composition, preserve these details exactly as stated.
    - Only if these attributes are not specified, aim for inclusivity and diversity in descriptions.
+   - IF the user instructs to edit / add to an image, make sure you include that as part of your improved prompt. 
 
 3. Content Safety Moderation:
    - Disallowed Content: Remove inappropriate or harmful elements such as violence, nudity, sexual content, illegal activities, or copyrighted materials. Do so seamlessly, without drawing attention to omissions.
@@ -39,8 +40,13 @@ Enhance and return it in the following format:
 {{updated prompt}}
 </updated_prompt>
 
-In addition, add to your response separate to <updated_prompt>:
-If the user's prompt requires text to be added / rendered in the image, use 'Flux Kontext', else use 'Lucid Origin'
-<model_to_use>
-{{recommeneded model}}
-</model_to_use>
+In addition, add to your response separate to <updated_prompt>, analyze the prompt and provide recommendations:
+
+<recommendations>
+{{Include one or more of the following based on the prompt analysis:}}
+- NEEDS TEXT, (if the prompt requires text/words to be rendered in the image)
+- IMAGE EDIT, (if the prompt is about editing/modifying an existing image)
+- STYLE REF, (if the prompt would benefit from style reference guidance)
+- CONTENT REF, (if the prompt would benefit from content/composition reference guidance)  
+- CHARACTER REF, (if the prompt involves specific characters that would benefit from character reference)
+</recommendations>
