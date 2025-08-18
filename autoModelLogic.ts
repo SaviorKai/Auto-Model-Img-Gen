@@ -24,7 +24,7 @@ const MODEL_CAPABILITIES: ModelCapabilities[] = [
   {
     name: 'Lucid Origin',
     rank: 1,
-    canHandleText: false,
+    canHandleText: true, // Can handle short text (1-2 words)
     canHandleImageEdit: true,
     maxReferenceImages: 1,
     supportedGuidanceTypes: ['CONTENT', 'STYLE']
@@ -59,7 +59,7 @@ interface ParsedRecommendation {
 
 export function parseRecommendation(recommendationString: string): ParsedRecommendation {
   // Handle both comma and newline formats
-  const needsText = recommendationString.includes('NEEDS TEXT');
+  const needsText = recommendationString.includes('NEEDS TEXT LONG') || recommendationString.includes('NEEDS TEXT SHORT');
   const needsImageEdit = recommendationString.includes('IMAGE EDIT');
   
   const preferredGuidanceTypes: ('STYLE' | 'CONTENT' | 'CHARACTER')[] = [];
@@ -113,10 +113,121 @@ export function selectGuidanceType(
   return 'Style Reference'; // Final fallback
 }
 
+// Helper function to analyze text complexity from the recommendation string
+function analyzeTextComplexity(recommendationString: string, originalPrompt?: string): 'none' | 'short' | 'long' {
+  // Override Gemini's classification if we can detect specific quoted text
+  if (originalPrompt && (recommendationString.includes('NEEDS TEXT LONG') || recommendationString.includes('NEEDS TEXT SHORT'))) {
+    console.log('🔧 Checking for quoted text override');
+    
+    // Look for quoted text patterns to override Gemini's classification
+    const quotedTextPatterns = [
+      /"([^"]{1,50})"/g,
+      /'([^']{1,50})'/g,
+      /reading "([^"]{1,50})"/gi,
+      /says "([^"]{1,50})"/gi,
+      /text "([^"]{1,50})"/gi,
+      /label "([^"]{1,50})"/gi,
+      /sign "([^"]{1,50})"/gi
+    ];
+    
+    for (const pattern of quotedTextPatterns) {
+      const matches = [...originalPrompt.matchAll(pattern)];
+      for (const match of matches) {
+        if (match[1]) {
+          const wordCount = match[1].trim().split(/\s+/).length;
+          console.log(`🔧 Found quoted text: "${match[1]}" (${wordCount} words)`);
+          if (wordCount <= 2) {
+            console.log('🔧 Override: Quoted text is 2 words or less, forcing SHORT');
+            return 'short';
+          } else if (wordCount >= 3) {
+            console.log('🔧 Override: Quoted text is 3+ words, forcing LONG');
+            return 'long';
+          }
+        }
+      }
+    }
+  }
+  
+  // Check for the new specific text indicators
+  if (recommendationString.includes('NEEDS TEXT LONG')) {
+    return 'long';
+  }
+  
+  if (recommendationString.includes('NEEDS TEXT SHORT')) {
+    return 'short';
+  }
+  
+  // If neither specific indicator is found, check for generic NEEDS TEXT
+  if (recommendationString.includes('NEEDS TEXT')) {
+    // If we have the original prompt, do a backup analysis
+    if (originalPrompt) {
+      console.log('🔧 Backup text analysis on original prompt');
+      
+      // Look for common patterns that indicate short text (quoted text)
+      const shortTextPatterns = [
+        /add the word[s]? ["']([^"']{1,20})["']/i,
+        /write ["']([^"']{1,20})["']/i,
+        /text says? ["']([^"']{1,20})["']/i,
+        /label[ed]? ["']([^"']{1,20})["']/i,
+        /sign says? ["']([^"']{1,20})["']/i
+      ];
+      
+      for (const pattern of shortTextPatterns) {
+        const match = originalPrompt.match(pattern);
+        if (match && match[1]) {
+          const wordCount = match[1].trim().split(/\s+/).length;
+          console.log(`🔧 Found quoted text pattern: "${match[1]}" (${wordCount} words)`);
+          if (wordCount <= 2) {
+            return 'short';
+          }
+        }
+      }
+      
+      // Look for patterns that indicate long text (complex descriptions)
+      const longTextPatterns = [
+        /paragraph/i,
+        /sentence/i,
+        /story/i,
+        /description/i,
+        /article/i,
+        /essay/i,
+        /multiple words/i,
+        /several words/i,
+        /long text/i,
+        /detailed text/i
+      ];
+      
+      for (const pattern of longTextPatterns) {
+        if (originalPrompt.match(pattern)) {
+          console.log(`🔧 Found long text indicator: ${pattern}`);
+          return 'long';
+        }
+      }
+      
+      // Count words in the entire prompt as a fallback
+      const promptWordCount = originalPrompt.trim().split(/\s+/).length;
+      console.log(`🔧 Prompt word count analysis: ${promptWordCount} words`);
+      
+      // If the prompt itself is short and simple, likely needs short text
+      if (promptWordCount <= 5) {
+        console.log('🔧 Short prompt detected, assuming short text needed');
+        return 'short';
+      }
+    }
+    
+    // Default to short text for ambiguous cases (Lucid Origin is better for general use)
+    console.log('🔧 Ambiguous text requirement, defaulting to short (Lucid Origin)');
+    return 'short';
+  }
+  
+  return 'none';
+}
+
 // Main auto model selection function
 export function selectOptimalModel(
   recommendationString: string,
-  referenceImageCount: number
+  referenceImageCount: number,
+  originalPrompt?: string
 ): { selectedModel: string; recommendedGuidanceType?: 'Context Images' | 'Style Reference' | 'Content Reference' | 'Character Reference' } {
   
   const recommendation = parseRecommendation(recommendationString);
@@ -146,11 +257,28 @@ export function selectOptimalModel(
   let candidateModels = [...MODEL_CAPABILITIES];
   console.log('  → Starting candidates:', candidateModels.map(m => m.name));
   
-  // Step 4: Eliminate models that can't handle text if text is needed
+  // Step 4: Handle text requirements with specific model selection
   if (recommendation.needsText) {
-    console.log('  → Text needed, filtering out non-text models');
-    candidateModels = candidateModels.filter(model => model.canHandleText);
-    console.log('  → After text filter:', candidateModels.map(m => m.name));
+    const textComplexity = analyzeTextComplexity(recommendationString, originalPrompt);
+    console.log(`  → Text needed, complexity: ${textComplexity}`);
+    
+    if (textComplexity === 'long') {
+      console.log('  → Long text detected, selecting Leonardo Phoenix 1.0');
+      return {
+        selectedModel: 'Leonardo Phoenix 1.0',
+        recommendedGuidanceType: recommendation.preferredGuidanceTypes.length > 0 
+          ? selectGuidanceType('Leonardo Phoenix 1.0', recommendation.preferredGuidanceTypes)
+          : undefined
+      };
+    } else if (textComplexity === 'short') {
+      console.log('  → Short text detected, selecting Lucid Origin');
+      return {
+        selectedModel: 'Lucid Origin',
+        recommendedGuidanceType: recommendation.preferredGuidanceTypes.length > 0 
+          ? selectGuidanceType('Lucid Origin', recommendation.preferredGuidanceTypes)
+          : undefined
+      };
+    }
   }
   
   // Step 5: If we have preferred guidance types, prefer models that support them

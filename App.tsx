@@ -1,12 +1,128 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { MediaItem } from './types';
-import { IMAGE_GEN_STYLES, CONTRAST_VALUES, getModelId, ASPECT_RATIO_DIMENSIONS, modelSupports, getModelsForNodeType } from './modelConfig';
+import { IMAGE_GEN_STYLES, CONTRAST_VALUES, getModelId, ASPECT_RATIO_DIMENSIONS, modelSupports, getModelsForNodeType, MODEL_CONFIG } from './modelConfig';
 import ImageViewer from './components/ImageViewer';
 import SettingsModal from './components/SettingsModal';
 import { GoogleGenAI } from "@google/genai";
 import { selectOptimalModel } from './autoModelLogic';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to map model ID to model name
+const getModelNameFromId = (modelId: string): string => {
+  const modelEntries = Object.entries(MODEL_CONFIG);
+  for (const [name, config] of modelEntries) {
+    if (config.id === modelId) {
+      return name;
+    }
+  }
+  // If no match found, return the ID itself as fallback
+  return modelId || 'Unknown';
+};
+
+// Function to fetch user's previous generations
+const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: number = 10): Promise<GenerationJob[]> => {
+  try {
+    // First get the user ID using the /me endpoint
+    const meResponse = await fetch('https://cloud.leonardo.ai/api/rest/v1/me', {
+      headers: { 
+        'Authorization': `Bearer ${apiKey}`,
+        'accept': 'application/json'
+      }
+    });
+    
+    if (!meResponse.ok) {
+      console.log('Failed to fetch user info:', meResponse.status, meResponse.statusText);
+      return [];
+    }
+    
+    const userData = await meResponse.json();
+    console.log('🔧 /me endpoint response:', userData);
+    
+    // Try different possible paths for user ID
+    const userId = userData?.user_details?.[0]?.user?.id || userData?.user_details?.id || userData?.id || userData?.user?.id || userData?.userId;
+    
+    if (!userId) {
+      console.log('Could not get user ID from response:', userData);
+      console.log('Available keys:', Object.keys(userData || {}));
+      return [];
+    }
+    
+    console.log('✅ Found user ID:', userId);
+
+    // Get user's generations with pagination
+    const response = await fetch(`https://cloud.leonardo.ai/api/rest/v1/generations/user/${userId}?offset=${offset}&limit=${limit}`, {
+      headers: { 
+        'Authorization': `Bearer ${apiKey}`,
+        'accept': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      console.log('Failed to fetch user generations:', response.status, response.statusText);
+      return [];
+    }
+    
+    const data = await response.json();
+    console.log('🔧 User generations response:', data);
+    console.log('🔧 Available keys in response:', Object.keys(data || {}));
+    
+    const generations = data.generations || data.data || data.items || [];
+    console.log('🔧 Found generations:', generations.length, 'total');
+    
+    // Process all returned generations (already limited by API call)
+    console.log('🔧 Processing', generations.length, 'generations');
+    
+    const generationJobs = generations.map((generation: any) => {
+      try {
+        console.log('🔧 Processing generation:', generation.id);
+        
+        if (!generation || generation.status !== 'COMPLETE') {
+          console.log('❌ Skipping incomplete generation:', generation.id);
+          return null;
+        }
+        
+        // Convert to our GenerationJob format
+        const images: MediaItem[] = generation.generated_images?.map((img: any) => ({
+          id: img.id,
+          url: img.url,
+          type: 'image' as const
+        })) || [];
+        
+        // Map model ID to human-readable model name
+        const modelName = getModelNameFromId(generation.modelId);
+        
+        const job: GenerationJob = {
+          id: generation.id,
+          prompt: generation.prompt || 'Previous generation',
+          numImages: images.length,
+          status: 'completed' as const,
+          images,
+          timestamp: new Date(generation.createdAt).getTime(),
+          model: modelName,
+          aspectRatio: '1:1', // Default, could be calculated from image dimensions
+          needsEnhancement: false,
+          referenceImages: [],
+          isPrevious: true
+        };
+        
+        console.log('✅ Converted generation:', job.id, 'with', job.numImages, 'images');
+        return job;
+      } catch (error) {
+        console.log('❌ Error processing generation:', error);
+        return null;
+      }
+    });
+    
+    const validJobs = generationJobs.filter(job => job !== null) as GenerationJob[];
+    console.log('✅ Successfully loaded', validJobs.length, 'previous generations');
+    return validJobs;
+    
+  } catch (error) {
+    console.log('Error fetching user generations:', error);
+    return [];
+  }
+};
 
 interface ReferenceImage {
   id: string;
@@ -37,6 +153,7 @@ interface GenerationJob {
     weight?: number; // weight for controlnets
     count: number; // number of reference images used
   }; // Store the type and configuration of reference images used
+  isPrevious?: boolean; // Flag to indicate if this is a previous generation loaded from API
 }
 
 const App: React.FC = () => {
@@ -63,9 +180,14 @@ const App: React.FC = () => {
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isButtonDisabled, setIsButtonDisabled] = useState(false);
   const [hasSecretsFile, setHasSecretsFile] = useState(false);
+  const [expandedPrompts, setExpandedPrompts] = useState<Set<string>>(new Set());
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMoreGenerations, setHasMoreGenerations] = useState(true);
+  const [generationsOffset, setGenerationsOffset] = useState(0);
   
   // Refs
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
+  const generationsScrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-resize textarea function
   const autoResizeTextarea = useCallback(() => {
@@ -74,6 +196,50 @@ const App: React.FC = () => {
       promptInputRef.current.style.height = `${Math.max(48, promptInputRef.current.scrollHeight)}px`;
     }
   }, []);
+
+  const togglePromptExpansion = (jobId: string) => {
+    setExpandedPrompts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(jobId)) {
+        newSet.delete(jobId);
+      } else {
+        newSet.add(jobId);
+      }
+      return newSet;
+    });
+  };
+
+  const loadMoreGenerations = async () => {
+    if (!apiKey || isLoadingMore || !hasMoreGenerations) return;
+    
+    setIsLoadingMore(true);
+    try {
+      const nextOffset = generationsOffset + 10;
+      const moreGenerations = await fetchUserGenerations(apiKey, nextOffset, 10);
+      
+      if (moreGenerations.length === 0) {
+        setHasMoreGenerations(false);
+      } else {
+        setGenerationJobs(prev => [...prev, ...moreGenerations]);
+        setGenerationsOffset(nextOffset);
+      }
+    } catch (error) {
+      console.log('❌ Error loading more generations:', error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
+  const handleScroll = useCallback(() => {
+    if (!generationsScrollRef.current) return;
+    
+    const { scrollTop, scrollHeight, clientHeight } = generationsScrollRef.current;
+    const threshold = 100; // Load more when 100px from bottom
+    
+    if (scrollTop + clientHeight >= scrollHeight - threshold) {
+      loadMoreGenerations();
+    }
+  }, [loadMoreGenerations]);
 
   // Auto-resize textarea when prompt changes
   useEffect(() => {
@@ -365,6 +531,36 @@ const App: React.FC = () => {
     if (storedGeminiApiKey) setGeminiApiKey(storedGeminiApiKey);
   }, []);
 
+  // Load previous generations when API key becomes available
+  useEffect(() => {
+    if (apiKey && generationJobs.length === 0) {
+      console.log('🔄 Loading previous generations...');
+      fetchUserGenerations(apiKey, 0, 10).then(previousJobs => {
+        if (previousJobs.length > 0) {
+          console.log(`📝 Loaded ${previousJobs.length} previous generations`);
+          setGenerationJobs(previousJobs);
+          setGenerationsOffset(10);
+          setHasMoreGenerations(previousJobs.length === 10); // If we got 10, there might be more
+        } else {
+          console.log('📝 No previous generations found');
+          setHasMoreGenerations(false);
+        }
+      }).catch(error => {
+        console.log('❌ Error loading previous generations:', error);
+        setHasMoreGenerations(false);
+      });
+    }
+  }, [apiKey]);
+
+  // Set up scroll listener for lazy loading
+  useEffect(() => {
+    const scrollContainer = generationsScrollRef.current;
+    if (scrollContainer) {
+      scrollContainer.addEventListener('scroll', handleScroll);
+      return () => scrollContainer.removeEventListener('scroll', handleScroll);
+    }
+  }, [handleScroll]);
+
   const handleSaveSettings = (leoKey: string, geminiKey: string) => {
     setApiKey(leoKey);
     localStorage.setItem('leonardo-api-key', leoKey);
@@ -422,7 +618,8 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
 
 <recommendations>
 {{Include one or more of the following based on the prompt analysis:}}
-- NEEDS TEXT, (if the prompt requires text/words to be rendered in the image)
+- NEEDS TEXT LONG, (if the prompt requires complex text with 3 or more words, multiple sentences, or paragraphs to be rendered in the image)
+- NEEDS TEXT SHORT, (if the prompt requires simple text with exactly 1 or 2 words only to be rendered in the image)
 - IMAGE EDIT, (if the prompt is about editing/modifying an existing image)
 - STYLE REF, (if the prompt would benefit from style reference guidance)
 - CONTENT REF, (if the prompt would benefit from content/composition reference guidance)  
@@ -462,7 +659,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
     const uploadedImageCount = referenceImages.filter(img => img.uploadedId && !img.isUploading).length;
     
     // Use auto model logic to select the best model
-    const { selectedModel, recommendedGuidanceType } = selectOptimalModel(recommendationsString, uploadedImageCount);
+    const { selectedModel, recommendedGuidanceType } = selectOptimalModel(recommendationsString, uploadedImageCount, userPrompt);
 
     // Log the auto model selection decision
     console.log('🎯 Auto Model Selection:');
@@ -958,6 +1155,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
               />
             </div>
 
+{/* Contrast setting hidden per user request
             {modelSupports(selectedModel === 'Auto' ? 'Leonardo Phoenix 1.0' : selectedModel, 'contrast') && (
               <div className="leo-stack leo-stack-3">
                 <label className="leo-text-sm leo-font-medium leo-text-secondary">Contrast</label>
@@ -971,8 +1169,9 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                   ))}
                 </select>
               </div>
-            )}
+            )} */}
 
+{/* Seed setting hidden per user request
             <div className="leo-stack leo-stack-3">
               <label className="leo-text-sm leo-font-medium leo-text-secondary">Seed (optional)</label>
               <input
@@ -982,7 +1181,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                 placeholder="Random"
                 className="leo-input"
               />
-            </div>
+            </div> */}
 
 
             {selectedModel !== 'Auto' && (
@@ -1268,7 +1467,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
           <div className="leo-app-generations-header">
             <h2 className="leo-text-lg leo-font-medium leo-text-primary">Generated Images</h2>
           </div>
-          <div className="leo-app-generations-content">
+          <div className="leo-app-generations-content" ref={generationsScrollRef}>
             <div style={{ maxWidth: '64rem', margin: '0 auto' }}>
             {generationJobs.length === 0 ? (
               <div style={{ textAlign: 'center', paddingTop: '48px', paddingBottom: '48px' }}>
@@ -1301,11 +1500,32 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                       <div className="leo-generation-job-info">
                         <div className="leo-cluster leo-cluster-3" style={{ marginBottom: '2px' }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <p className="leo-text-base leo-font-medium leo-text-primary leo-truncate" style={{ marginBottom: '0' }}>
-                              {job.enhancedPrompt || job.prompt}
-                            </p>
+                            <div className="leo-cluster leo-cluster-2" style={{ alignItems: 'center', marginBottom: '0' }}>
+                              <p 
+                                className={`leo-text-base leo-font-medium leo-text-primary ${expandedPrompts.has(job.id) ? '' : 'leo-truncate'}`} 
+                                style={{ 
+                                  marginBottom: '0', 
+                                  cursor: 'pointer',
+                                  transition: 'color 0.2s ease',
+                                  flex: 1
+                                }}
+                                onClick={() => togglePromptExpansion(job.id)}
+                                title="Click to expand/collapse prompt"
+                              >
+                                {job.enhancedPrompt || job.prompt}
+                              </p>
+                            </div>
                             {job.enhancedPrompt && job.enhancedPrompt !== job.prompt && (
-                              <p className="leo-text-sm leo-text-secondary leo-truncate" style={{ marginTop: '1px', marginBottom: '0' }}>
+                              <p 
+                                className={`leo-text-sm leo-text-secondary ${expandedPrompts.has(job.id) ? '' : 'leo-truncate'}`} 
+                                style={{ 
+                                  marginTop: '1px', 
+                                  marginBottom: '0',
+                                  cursor: 'pointer'
+                                }}
+                                onClick={() => togglePromptExpansion(job.id)}
+                                title="Click to expand/collapse original prompt"
+                              >
                                 Original: {job.prompt}
                               </p>
                             )}
@@ -1428,6 +1648,25 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                     </div>
                   </div>
                 ))}
+                
+                {/* Loading more indicator */}
+                {isLoadingMore && (
+                  <div style={{ textAlign: 'center', padding: '24px' }}>
+                    <div className="leo-spinner leo-spinner-lg" style={{ margin: '0 auto' }}></div>
+                    <p className="leo-text-sm leo-text-secondary" style={{ marginTop: '12px' }}>
+                      Loading more generations...
+                    </p>
+                  </div>
+                )}
+                
+                {/* End of results indicator */}
+                {!hasMoreGenerations && generationJobs.length > 0 && (
+                  <div style={{ textAlign: 'center', padding: '24px' }}>
+                    <p className="leo-text-sm leo-text-tertiary">
+                      You've reached the end of your generation history
+                    </p>
+                  </div>
+                )}
               </div>
             )}
             </div>
