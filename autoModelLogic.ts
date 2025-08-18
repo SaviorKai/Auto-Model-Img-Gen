@@ -67,11 +67,6 @@ export function parseRecommendation(recommendationString: string): ParsedRecomme
   if (recommendationString.includes('CONTENT REF')) preferredGuidanceTypes.push('CONTENT');
   if (recommendationString.includes('CHARACTER REF')) preferredGuidanceTypes.push('CHARACTER');
   
-  console.log('🔧 Parse Debug:');
-  console.log('  Input string:', JSON.stringify(recommendationString));
-  console.log('  needsText:', needsText);
-  console.log('  needsImageEdit:', needsImageEdit);
-  console.log('  preferredGuidanceTypes:', preferredGuidanceTypes);
   
   return {
     needsText,
@@ -117,8 +112,6 @@ export function selectGuidanceType(
 function analyzeTextComplexity(recommendationString: string, originalPrompt?: string): 'none' | 'short' | 'long' {
   // Override Gemini's classification if we can detect specific quoted text
   if (originalPrompt && (recommendationString.includes('NEEDS TEXT LONG') || recommendationString.includes('NEEDS TEXT SHORT'))) {
-    console.log('🔧 Checking for quoted text override');
-    
     // Look for quoted text patterns to override Gemini's classification
     const quotedTextPatterns = [
       /"([^"]{1,50})"/g,
@@ -135,12 +128,9 @@ function analyzeTextComplexity(recommendationString: string, originalPrompt?: st
       for (const match of matches) {
         if (match[1]) {
           const wordCount = match[1].trim().split(/\s+/).length;
-          console.log(`🔧 Found quoted text: "${match[1]}" (${wordCount} words)`);
           if (wordCount <= 2) {
-            console.log('🔧 Override: Quoted text is 2 words or less, forcing SHORT');
             return 'short';
           } else if (wordCount >= 3) {
-            console.log('🔧 Override: Quoted text is 3+ words, forcing LONG');
             return 'long';
           }
         }
@@ -161,8 +151,6 @@ function analyzeTextComplexity(recommendationString: string, originalPrompt?: st
   if (recommendationString.includes('NEEDS TEXT')) {
     // If we have the original prompt, do a backup analysis
     if (originalPrompt) {
-      console.log('🔧 Backup text analysis on original prompt');
-      
       // Look for common patterns that indicate short text (quoted text)
       const shortTextPatterns = [
         /add the word[s]? ["']([^"']{1,20})["']/i,
@@ -176,7 +164,6 @@ function analyzeTextComplexity(recommendationString: string, originalPrompt?: st
         const match = originalPrompt.match(pattern);
         if (match && match[1]) {
           const wordCount = match[1].trim().split(/\s+/).length;
-          console.log(`🔧 Found quoted text pattern: "${match[1]}" (${wordCount} words)`);
           if (wordCount <= 2) {
             return 'short';
           }
@@ -199,24 +186,20 @@ function analyzeTextComplexity(recommendationString: string, originalPrompt?: st
       
       for (const pattern of longTextPatterns) {
         if (originalPrompt.match(pattern)) {
-          console.log(`🔧 Found long text indicator: ${pattern}`);
           return 'long';
         }
       }
       
       // Count words in the entire prompt as a fallback
       const promptWordCount = originalPrompt.trim().split(/\s+/).length;
-      console.log(`🔧 Prompt word count analysis: ${promptWordCount} words`);
       
       // If the prompt itself is short and simple, likely needs short text
       if (promptWordCount <= 5) {
-        console.log('🔧 Short prompt detected, assuming short text needed');
         return 'short';
       }
     }
     
     // Default to short text for ambiguous cases (Lucid Origin is better for general use)
-    console.log('🔧 Ambiguous text requirement, defaulting to short (Lucid Origin)');
     return 'short';
   }
   
@@ -232,12 +215,8 @@ export function selectOptimalModel(
   
   const recommendation = parseRecommendation(recommendationString);
   
-  console.log('🔍 Auto Logic Debug:');
-  console.log('  Parsed recommendation:', recommendation);
-  
   // Step 1: Handle image editing (separate category)
   if (recommendation.needsImageEdit) {
-    console.log('  → Image edit detected, selecting FLUX.1 Kontext');
     return { 
       selectedModel: 'FLUX.1 Kontext',
       recommendedGuidanceType: referenceImageCount > 0 ? 'Context Images' : undefined
@@ -246,7 +225,6 @@ export function selectOptimalModel(
   
   // Step 2: If there are reference images, ALWAYS use FLUX.1 Kontext Pro
   if (referenceImageCount > 0) {
-    console.log(`  → ${referenceImageCount} reference images detected, selecting FLUX.1 Kontext Pro`);
     return {
       selectedModel: 'FLUX.1 Kontext Pro',
       recommendedGuidanceType: 'Context Images'
@@ -255,15 +233,12 @@ export function selectOptimalModel(
   
   // Step 3: Start with all available models (no reference images)
   let candidateModels = [...MODEL_CAPABILITIES];
-  console.log('  → Starting candidates:', candidateModels.map(m => m.name));
   
   // Step 4: Handle text requirements with specific model selection
   if (recommendation.needsText) {
     const textComplexity = analyzeTextComplexity(recommendationString, originalPrompt);
-    console.log(`  → Text needed, complexity: ${textComplexity}`);
     
     if (textComplexity === 'long') {
-      console.log('  → Long text detected, selecting Leonardo Phoenix 1.0');
       return {
         selectedModel: 'Leonardo Phoenix 1.0',
         recommendedGuidanceType: recommendation.preferredGuidanceTypes.length > 0 
@@ -271,7 +246,6 @@ export function selectOptimalModel(
           : undefined
       };
     } else if (textComplexity === 'short') {
-      console.log('  → Short text detected, selecting Lucid Origin');
       return {
         selectedModel: 'Lucid Origin',
         recommendedGuidanceType: recommendation.preferredGuidanceTypes.length > 0 
@@ -283,7 +257,6 @@ export function selectOptimalModel(
   
   // Step 5: If we have preferred guidance types, prefer models that support them
   if (recommendation.preferredGuidanceTypes.length > 0) {
-    console.log('  → Preferred guidance types:', recommendation.preferredGuidanceTypes);
     const modelsWithPreferredGuidance = candidateModels.filter(model =>
       recommendation.preferredGuidanceTypes.some(type => model.supportedGuidanceTypes.includes(type))
     );
@@ -291,13 +264,11 @@ export function selectOptimalModel(
     // If we found models with preferred guidance, use those
     if (modelsWithPreferredGuidance.length > 0) {
       candidateModels = modelsWithPreferredGuidance;
-      console.log('  → After guidance filter:', candidateModels.map(m => m.name));
     }
   }
   
   // Step 6: If no candidates remain, fallback to Lucid Origin
   if (candidateModels.length === 0) {
-    console.warn('  → No suitable models found, falling back to Lucid Origin');
     return { 
       selectedModel: 'Lucid Origin',
       recommendedGuidanceType: undefined
@@ -307,7 +278,6 @@ export function selectOptimalModel(
   // Step 7: Select the best model (lowest rank wins)
   candidateModels.sort((a, b) => a.rank - b.rank);
   const selectedModel = candidateModels[0];
-  console.log('  → Final selection:', selectedModel.name, 'rank:', selectedModel.rank);
   
   // Step 8: No reference images, so no guidance type needed
   const recommendedGuidanceType = undefined;

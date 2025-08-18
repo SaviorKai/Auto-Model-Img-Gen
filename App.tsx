@@ -32,23 +32,18 @@ const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: n
     });
     
     if (!meResponse.ok) {
-      console.log('Failed to fetch user info:', meResponse.status, meResponse.statusText);
+      // Failed to fetch user info
       return [];
     }
     
     const userData = await meResponse.json();
-    console.log('🔧 /me endpoint response:', userData);
     
     // Try different possible paths for user ID
     const userId = userData?.user_details?.[0]?.user?.id || userData?.user_details?.id || userData?.id || userData?.user?.id || userData?.userId;
     
     if (!userId) {
-      console.log('Could not get user ID from response:', userData);
-      console.log('Available keys:', Object.keys(userData || {}));
       return [];
     }
-    
-    console.log('✅ Found user ID:', userId);
 
     // Get user's generations with pagination
     const response = await fetch(`https://cloud.leonardo.ai/api/rest/v1/generations/user/${userId}?offset=${offset}&limit=${limit}`, {
@@ -59,26 +54,15 @@ const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: n
     });
     
     if (!response.ok) {
-      console.log('Failed to fetch user generations:', response.status, response.statusText);
       return [];
     }
     
     const data = await response.json();
-    console.log('🔧 User generations response:', data);
-    console.log('🔧 Available keys in response:', Object.keys(data || {}));
-    
     const generations = data.generations || data.data || data.items || [];
-    console.log('🔧 Found generations:', generations.length, 'total');
-    
-    // Process all returned generations (already limited by API call)
-    console.log('🔧 Processing', generations.length, 'generations');
     
     const generationJobs = generations.map((generation: any) => {
       try {
-        console.log('🔧 Processing generation:', generation.id);
-        
         if (!generation || generation.status !== 'COMPLETE') {
-          console.log('❌ Skipping incomplete generation:', generation.id);
           return null;
         }
         
@@ -106,20 +90,16 @@ const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: n
           isPrevious: true
         };
         
-        console.log('✅ Converted generation:', job.id, 'with', job.numImages, 'images');
         return job;
       } catch (error) {
-        console.log('❌ Error processing generation:', error);
         return null;
       }
     });
     
     const validJobs = generationJobs.filter(job => job !== null) as GenerationJob[];
-    console.log('✅ Successfully loaded', validJobs.length, 'previous generations');
     return validJobs;
     
   } catch (error) {
-    console.log('Error fetching user generations:', error);
     return [];
   }
 };
@@ -224,7 +204,7 @@ const App: React.FC = () => {
         setGenerationsOffset(nextOffset);
       }
     } catch (error) {
-      console.log('❌ Error loading more generations:', error);
+      // Silent error handling for loading more generations
     } finally {
       setIsLoadingMore(false);
     }
@@ -534,19 +514,15 @@ const App: React.FC = () => {
   // Load previous generations when API key becomes available
   useEffect(() => {
     if (apiKey && generationJobs.length === 0) {
-      console.log('🔄 Loading previous generations...');
       fetchUserGenerations(apiKey, 0, 10).then(previousJobs => {
         if (previousJobs.length > 0) {
-          console.log(`📝 Loaded ${previousJobs.length} previous generations`);
           setGenerationJobs(previousJobs);
           setGenerationsOffset(10);
           setHasMoreGenerations(previousJobs.length === 10); // If we got 10, there might be more
         } else {
-          console.log('📝 No previous generations found');
           setHasMoreGenerations(false);
         }
       }).catch(error => {
-        console.log('❌ Error loading previous generations:', error);
         setHasMoreGenerations(false);
       });
     }
@@ -649,11 +625,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
     const enhancedPrompt = updatedPromptMatch ? updatedPromptMatch[1].trim() : userPrompt;
     const recommendationsString = recommendationsMatch ? recommendationsMatch[1].trim() : 'STYLE REF,';
 
-    // Log the prompt enhancement recommendations
-    console.log('🤖 Prompt Enhancement Results:');
-    console.log('  Original prompt:', userPrompt);
-    console.log('  Enhanced prompt:', enhancedPrompt);
-    console.log('  Recommendations:', recommendationsString);
 
     // Count uploaded reference images for auto model selection
     const uploadedImageCount = referenceImages.filter(img => img.uploadedId && !img.isUploading).length;
@@ -661,11 +632,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
     // Use auto model logic to select the best model
     const { selectedModel, recommendedGuidanceType } = selectOptimalModel(recommendationsString, uploadedImageCount, userPrompt);
 
-    // Log the auto model selection decision
-    console.log('🎯 Auto Model Selection:');
-    console.log('  Reference images:', uploadedImageCount);
-    console.log('  Selected model:', selectedModel);
-    console.log('  Recommended guidance:', recommendedGuidanceType || 'None');
 
     // Validate that the selected model exists in our configuration
     const allImageModels = getModelsForNodeType('image-generation');
@@ -702,7 +668,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
       if (recommendedGuidanceType && recommendedGuidanceType !== 'Context Images') {
         // Use the auto-recommended guidance type
         referenceTypeName = recommendedGuidanceType;
-        console.log(`🎯 Using recommended guidance type: ${referenceTypeName}`);
       } else {
         // Fallback to original logic
         const guidanceConfig = getImageGuidanceConfig(modelToUse);
@@ -714,7 +679,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
         } else if (guidanceConfig.contentRef) {
           referenceTypeName = 'Content Reference';
         }
-        console.log(`🎯 Using fallback guidance type: ${referenceTypeName}`);
       }
       
       const strengthType = "Mid";
@@ -876,7 +840,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
         // Get the recommended guidance type from the job's reference config
         const currentJob = generationJobs.find(job => job.id === jobId);
         const recommendedGuidanceType = currentJob?.referenceConfig?.type;
-        console.log(`🎯 Generation using guidance type: ${recommendedGuidanceType || 'None'}`);
         
         if (uploadedImages.length > 0) {
           // Flux Kontext models use contextImages instead of controlnets
@@ -910,9 +873,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                   if (guidanceConfig.charRef) {
                     guidanceType = 'charRef';
                     preprocessorId = guidanceConfig.charRef;
-                    console.log('🎯 Using Character Reference as recommended');
                   } else {
-                    console.log('⚠️ Character Reference not supported by model, falling back');
                     guidanceType = 'styleRef';
                     preprocessorId = guidanceConfig.styleRef;
                   }
@@ -921,9 +882,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                   if (guidanceConfig.contentRef) {
                     guidanceType = 'contentRef';
                     preprocessorId = guidanceConfig.contentRef;
-                    console.log('🎯 Using Content Reference as recommended');
                   } else {
-                    console.log('⚠️ Content Reference not supported by model, falling back');
                     guidanceType = 'styleRef';
                     preprocessorId = guidanceConfig.styleRef;
                   }
@@ -932,14 +891,12 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                 default:
                   guidanceType = 'styleRef';
                   preprocessorId = guidanceConfig.styleRef;
-                  console.log('🎯 Using Style Reference as recommended');
                   break;
               }
             } else if (actualModelToUse === 'Lucid Realism') {
               // Lucid Realism: only use Style Reference
               guidanceType = 'styleRef';
               preprocessorId = guidanceConfig.styleRef;
-              console.log('🎯 Lucid Realism forced to Style Reference');
             } else {
               // Fallback to original logic
               if (guidanceConfig.styleRef) {
@@ -949,7 +906,6 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                 guidanceType = 'contentRef';
                 preprocessorId = guidanceConfig.contentRef;
               }
-              console.log('🎯 Using fallback guidance selection');
             }
             
             if (preprocessorId) {
@@ -1640,7 +1596,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                               alt={`Generated image ${index + 1}`}
                               className="leo-generation-image"
                               images={allGenerations.map(g => ({ src: g.url, alt: `Generated image` }))}
-                              sidebarOpen={false}
+                              sidebarOpen={true}
                             />
                           </div>
                         ))

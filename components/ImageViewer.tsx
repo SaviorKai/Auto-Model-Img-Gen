@@ -1,11 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-
-// Global state for expanded image
-let expandedImageSrc: string | null = null;
-const expandedImageListeners: Set<() => void> = new Set();
-
-export const getExpandedImageSrc = () => expandedImageSrc;
 
 interface ImageItem {
   src: string;
@@ -32,7 +26,6 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [isZoomedIn, setIsZoomedIn] = useState(false);
-  const [, forceUpdate] = useState({});
   
   const allImages = images.length > 0 ? images : [{ src, alt }];
   const hasMultipleImages = allImages.length > 1;
@@ -44,80 +37,72 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
     }
   }, [src, images]);
 
+  // Close expanded view when pressing Escape key
   useEffect(() => {
-    if (!sidebarOpen && isExpanded) {
-      setIsExpanded(false);
-      setIsZoomedIn(false);
-      expandedImageSrc = null;
-    }
-  }, [sidebarOpen, isExpanded]);
-
-  useEffect(() => {
-    const updateListener = () => forceUpdate({});
-    expandedImageListeners.add(updateListener);
-    return () => {
-      expandedImageListeners.delete(updateListener);
+    if (!isExpanded) return;
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeExpanded();
+      } else if (e.key === 'ArrowLeft' && hasMultipleImages) {
+        e.preventDefault();
+        navigateToPrevious();
+      } else if (e.key === 'ArrowRight' && hasMultipleImages) {
+        e.preventDefault();
+        navigateToNext();
+      }
     };
+    
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isExpanded, hasMultipleImages, currentIndex]);
+
+  const closeExpanded = useCallback(() => {
+    setIsExpanded(false);
+    setIsZoomedIn(false);
   }, []);
-  
-  const handleClick = () => {
-    if (!isExpanded) {
-      setIsExpanded(true);
-      setIsZoomedIn(false);
-      expandedImageSrc = allImages[currentIndex].src;
-      expandedImageListeners.forEach(listener => listener());
-    }
-  };
 
-  const handleBackdropClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
-      setIsExpanded(false);
-      setIsZoomedIn(false);
-      expandedImageSrc = null;
-      expandedImageListeners.forEach(listener => listener());
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      setIsExpanded(false);
-      setIsZoomedIn(false);
-      expandedImageSrc = null;
-      expandedImageListeners.forEach(listener => listener());
-    } else if (e.key === 'ArrowLeft' && hasMultipleImages) {
-      e.preventDefault();
-      const newIndex = (currentIndex - 1 + allImages.length) % allImages.length;
-      setCurrentIndex(newIndex);
-      setIsZoomedIn(false);
-      expandedImageSrc = allImages[newIndex].src;
-      expandedImageListeners.forEach(listener => listener());
-    } else if (e.key === 'ArrowRight' && hasMultipleImages) {
-      e.preventDefault();
-      const newIndex = (currentIndex + 1) % allImages.length;
-      setCurrentIndex(newIndex);
-      setIsZoomedIn(false);
-      expandedImageSrc = allImages[newIndex].src;
-      expandedImageListeners.forEach(listener => listener());
-    }
-  };
-
-  const goToPrevious = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const navigateToPrevious = useCallback(() => {
     const newIndex = (currentIndex - 1 + allImages.length) % allImages.length;
     setCurrentIndex(newIndex);
     setIsZoomedIn(false);
-    expandedImageSrc = allImages[newIndex].src;
-    expandedImageListeners.forEach(listener => listener());
-  };
+  }, [currentIndex, allImages.length]);
 
-  const goToNext = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const navigateToNext = useCallback(() => {
     const newIndex = (currentIndex + 1) % allImages.length;
     setCurrentIndex(newIndex);
     setIsZoomedIn(false);
-    expandedImageSrc = allImages[newIndex].src;
-    expandedImageListeners.forEach(listener => listener());
-  };
+  }, [currentIndex, allImages.length]);
+  
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isExpanded) {
+      setIsExpanded(true);
+      setIsZoomedIn(false);
+    }
+  }, [isExpanded]);
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent) => {
+    // Only close if clicking directly on the backdrop, not on child elements
+    if (e.target === e.currentTarget) {
+      closeExpanded();
+    }
+  }, [closeExpanded]);
+
+  const handleImageClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsZoomedIn(!isZoomedIn);
+  }, [isZoomedIn]);
+
+  const goToPrevious = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigateToPrevious();
+  }, [navigateToPrevious]);
+
+  const goToNext = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigateToNext();
+  }, [navigateToNext]);
 
   return (
     <>
@@ -135,17 +120,16 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
             position: 'fixed',
             top: 0,
             left: 0,
-            right: '320px',
+            right: sidebarOpen ? '320px' : '0',
             bottom: 0,
-            backgroundColor: 'rgba(16, 21, 31, 0.9)',
+            backgroundColor: 'rgba(16, 21, 31, 0.95)',
             backdropFilter: 'blur(8px)',
-            zIndex: 90,
+            zIndex: 1000,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center'
           }}
           onClick={handleBackdropClick}
-          onKeyDown={handleKeyDown}
           tabIndex={0}
           role="dialog"
           aria-modal="true"
@@ -155,30 +139,25 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
             style={{
               position: 'absolute',
               top: '16px',
-              left: '16px',
+              right: '16px',
               color: 'white',
               fontSize: '2rem',
-              zIndex: 10,
+              zIndex: 1001,
               width: '40px',
               height: '40px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              background: 'rgba(0, 0, 0, 0.5)',
+              background: 'rgba(0, 0, 0, 0.7)',
               borderRadius: '50%',
               border: 'none',
               cursor: 'pointer',
               transition: 'all 0.2s ease'
             }}
-            onClick={() => {
-              setIsExpanded(false);
-              setIsZoomedIn(false);
-              expandedImageSrc = null;
-              expandedImageListeners.forEach(listener => listener());
-            }}
+            onClick={closeExpanded}
             aria-label="Close expanded view"
-            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.7)'}
-            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.9)'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.7)'}
           >
             ×
           </button>
@@ -249,11 +228,22 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
               cursor: 'pointer',
               transition: 'all 0.3s ease',
               ...(isZoomedIn 
-                ? { width: 'auto', height: 'auto', maxWidth: 'none', maxHeight: 'none', transform: 'scale(1)' }
-                : { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }
+                ? { 
+                    width: 'auto', 
+                    height: 'auto', 
+                    maxWidth: 'none', 
+                    maxHeight: 'none', 
+                    transform: 'scale(2)', 
+                    transformOrigin: 'center'
+                  }
+                : { 
+                    maxWidth: '90%', 
+                    maxHeight: '90%', 
+                    objectFit: 'contain' 
+                  }
               )
             }}
-            onClick={() => setIsZoomedIn(!isZoomedIn)}
+            onClick={handleImageClick}
           />
         </div>,
         document.body
