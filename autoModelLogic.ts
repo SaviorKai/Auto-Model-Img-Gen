@@ -133,22 +133,24 @@ export function selectOptimalModel(
     };
   }
   
-  // Step 2: Start with all available models
+  // Step 2: If there are reference images, ALWAYS use FLUX.1 Kontext Pro
+  if (referenceImageCount > 0) {
+    console.log(`  → ${referenceImageCount} reference images detected, selecting FLUX.1 Kontext Pro`);
+    return {
+      selectedModel: 'FLUX.1 Kontext Pro',
+      recommendedGuidanceType: 'Context Images'
+    };
+  }
+  
+  // Step 3: Start with all available models (no reference images)
   let candidateModels = [...MODEL_CAPABILITIES];
   console.log('  → Starting candidates:', candidateModels.map(m => m.name));
   
-  // Step 3: Eliminate models that can't handle text if text is needed
+  // Step 4: Eliminate models that can't handle text if text is needed
   if (recommendation.needsText) {
     console.log('  → Text needed, filtering out non-text models');
     candidateModels = candidateModels.filter(model => model.canHandleText);
     console.log('  → After text filter:', candidateModels.map(m => m.name));
-  }
-  
-  // Step 4: Eliminate models that can't handle the number of reference images
-  if (referenceImageCount > 0) {
-    console.log(`  → ${referenceImageCount} reference images, filtering by capacity`);
-    candidateModels = candidateModels.filter(model => model.maxReferenceImages >= referenceImageCount);
-    console.log('  → After image count filter:', candidateModels.map(m => m.name));
   }
   
   // Step 5: If we have preferred guidance types, prefer models that support them
@@ -170,7 +172,7 @@ export function selectOptimalModel(
     console.warn('  → No suitable models found, falling back to Lucid Origin');
     return { 
       selectedModel: 'Lucid Origin',
-      recommendedGuidanceType: referenceImageCount > 0 ? selectGuidanceType('Lucid Origin', recommendation.preferredGuidanceTypes) : undefined
+      recommendedGuidanceType: undefined
     };
   }
   
@@ -179,10 +181,8 @@ export function selectOptimalModel(
   const selectedModel = candidateModels[0];
   console.log('  → Final selection:', selectedModel.name, 'rank:', selectedModel.rank);
   
-  // Step 8: Determine guidance type if we have reference images
-  const recommendedGuidanceType = referenceImageCount > 0 
-    ? selectGuidanceType(selectedModel.name, recommendation.preferredGuidanceTypes)
-    : undefined;
+  // Step 8: No reference images, so no guidance type needed
+  const recommendedGuidanceType = undefined;
   
   return {
     selectedModel: selectedModel.name,
