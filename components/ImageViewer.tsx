@@ -31,6 +31,42 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
   const hasMultipleImages = allImages.length > 1;
   const scrollDelta = useRef(0);
   const thumbnailSidebarRef = useRef<HTMLDivElement>(null);
+  const lastScrollTime = useRef(0);
+  const scrollAnimation = useRef<number | null>(null);
+  
+  // Custom smooth scroll with Mac-like easing
+  const smoothScrollTo = useCallback((element: HTMLElement, targetTop: number) => {
+    const startTop = element.scrollTop;
+    const distance = targetTop - startTop;
+    const duration = 120; // Fast but smooth - 120ms like Mac trackpad
+    let startTime: number | null = null;
+    
+    // Cancel any existing animation
+    if (scrollAnimation.current) {
+      cancelAnimationFrame(scrollAnimation.current);
+    }
+    
+    const easeOutQuart = (t: number): number => {
+      return 1 - Math.pow(1 - t, 4); // Mac-like easing curve
+    };
+    
+    const animate = (currentTime: number) => {
+      if (startTime === null) startTime = currentTime;
+      const elapsed = currentTime - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const easedProgress = easeOutQuart(progress);
+      
+      element.scrollTop = startTop + distance * easedProgress;
+      
+      if (progress < 1) {
+        scrollAnimation.current = requestAnimationFrame(animate);
+      } else {
+        scrollAnimation.current = null;
+      }
+    };
+    
+    scrollAnimation.current = requestAnimationFrame(animate);
+  }, []);
   
   useEffect(() => {
     if (images.length > 0) {
@@ -39,26 +75,22 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
     }
   }, [src, images]);
 
-  // Auto-scroll thumbnail sidebar to keep current image visible
+  // Auto-scroll thumbnail sidebar to keep current image centered
   useEffect(() => {
     if (!isExpanded || !hasMultipleImages || !thumbnailSidebarRef.current) return;
 
     const sidebar = thumbnailSidebarRef.current;
-    const thumbnailHeight = 136; // 128px (actual thumbnail) + 8px gap
+    const thumbnailHeight = 136; // 128px (actual thumbnail) + 8px gap  
     const headerHeight = 56; // Header with counter + margin
-    const sidebarPadding = 16; // Top padding
     
-    // Calculate the position to center the current thumbnail
-    const thumbnailTop = headerHeight + (currentIndex * thumbnailHeight);
-    const sidebarCenter = sidebar.clientHeight / 2;
-    const targetScrollTop = Math.max(0, thumbnailTop - sidebarCenter + (thumbnailHeight / 2));
+    // Calculate position to center the current thumbnail in viewport
+    const thumbnailCenter = headerHeight + (currentIndex * thumbnailHeight) + (thumbnailHeight / 2);
+    const sidebarViewportCenter = sidebar.clientHeight / 2;
+    const targetScrollTop = Math.max(0, thumbnailCenter - sidebarViewportCenter);
     
-    // Use immediate scrolling for more responsive feel
-    sidebar.scrollTo({
-      top: targetScrollTop,
-      behavior: 'auto'
-    });
-  }, [currentIndex, isExpanded, hasMultipleImages]);
+    // Use custom smooth scroll for Mac-like feel
+    smoothScrollTo(sidebar, targetScrollTop);
+  }, [currentIndex, isExpanded, hasMultipleImages, smoothScrollTo]);
 
   const closeExpanded = useCallback(() => {
     setIsExpanded(false);
@@ -100,6 +132,12 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
       
       e.preventDefault();
       
+      const now = Date.now();
+      const timeSinceLastScroll = now - lastScrollTime.current;
+      
+      // Light throttle to prevent too-rapid navigation while keeping responsiveness
+      if (timeSinceLastScroll < 50) return;
+      
       // Accumulate scroll delta to match natural scroll feel
       scrollDelta.current += e.deltaY;
       
@@ -107,6 +145,8 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
       const threshold = 100; // Adjust this to control sensitivity
       
       if (Math.abs(scrollDelta.current) >= threshold) {
+        lastScrollTime.current = now;
+        
         if (scrollDelta.current > 0) {
           navigateToNext();
         } else {
@@ -362,19 +402,25 @@ const ImageViewer: React.FC<ImageViewerProps> = ({
                       border: currentIndex === index 
                         ? '3px solid #C66BD5' 
                         : '2px solid transparent',
-                      transition: 'all 0.2s ease',
+                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', // Smoother easing
                       opacity: currentIndex === index ? 1 : 0.7,
-                      width: '100%'
+                      width: '100%',
+                      transform: currentIndex === index ? 'scale(1.05)' : 'scale(1)', // Slight scale for active
+                      boxShadow: currentIndex === index 
+                        ? '0 8px 25px rgba(198, 107, 213, 0.3)' 
+                        : '0 2px 8px rgba(0, 0, 0, 0.1)'
                     }}
                     onClick={() => jumpToImage(index)}
                     onMouseEnter={(e) => {
                       if (currentIndex !== index) {
                         e.currentTarget.style.opacity = '0.9';
+                        e.currentTarget.style.transform = 'scale(1.02)';
                       }
                     }}
                     onMouseLeave={(e) => {
                       if (currentIndex !== index) {
                         e.currentTarget.style.opacity = '0.7';
+                        e.currentTarget.style.transform = 'scale(1)';
                       }
                     }}
                   >

@@ -20,8 +20,8 @@ const getModelNameFromId = (modelId: string): string => {
   return modelId || 'Unknown';
 };
 
-// Function to fetch user's previous generations
-const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: number = 10): Promise<GenerationJob[]> => {
+// Simple, fast function to fetch user's generations - returns both valid jobs and raw count
+const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: number = 10): Promise<{ validJobs: GenerationJob[], rawCount: number }> => {
   try {
     // First get the user ID using the /me endpoint
     const meResponse = await fetch('https://cloud.leonardo.ai/api/rest/v1/me', {
@@ -60,47 +60,49 @@ const fetchUserGenerations = async (apiKey: string, offset: number = 0, limit: n
     const data = await response.json();
     const generations = data.generations || data.data || data.items || [];
     
-    const generationJobs = generations.map((generation: any) => {
-      try {
-        if (!generation || generation.status !== 'COMPLETE') {
-          return null;
-        }
-        
-        // Convert to our GenerationJob format
-        const images: MediaItem[] = generation.generated_images?.map((img: any) => ({
-          id: img.id,
-          url: img.url,
-          type: 'image' as const
-        })) || [];
-        
-        // Map model ID to human-readable model name
-        const modelName = getModelNameFromId(generation.modelId);
-        
-        const job: GenerationJob = {
-          id: generation.id,
-          prompt: generation.prompt || 'Previous generation',
-          numImages: images.length,
-          status: 'completed' as const,
-          images,
-          timestamp: new Date(generation.createdAt).getTime(),
-          model: modelName,
-          aspectRatio: '1:1', // Default, could be calculated from image dimensions
-          needsEnhancement: false,
-          referenceImages: [],
-          isPrevious: true
-        };
-        
-        return job;
-      } catch (error) {
-        return null;
-      }
-    });
     
-    const validJobs = generationJobs.filter(job => job !== null) as GenerationJob[];
-    return validJobs;
+    // Filter and convert generations - simple and fast
+    const validJobs: GenerationJob[] = [];
+    
+    for (const generation of generations) {
+      // Skip if incomplete or no images
+      if (!generation || 
+          generation.status !== 'COMPLETE' || 
+          !generation.generated_images || 
+          generation.generated_images.length === 0) {
+        continue;
+      }
+      
+      const images: MediaItem[] = generation.generated_images.map((img: any) => ({
+        id: img.id,
+        url: img.url,
+        type: 'image' as const
+      }));
+      
+      const modelName = getModelNameFromId(generation.modelId);
+      
+      const job: GenerationJob = {
+        id: generation.id,
+        prompt: generation.prompt || 'Previous generation',
+        numImages: images.length,
+        status: 'completed' as const,
+        images,
+        timestamp: new Date(generation.createdAt).getTime(),
+        model: modelName,
+        aspectRatio: '1:1',
+        needsEnhancement: false,
+        referenceImages: [],
+        isPrevious: true
+      };
+      
+      validJobs.push(job);
+    }
+    
+    return { validJobs, rawCount: generations.length };
     
   } catch (error) {
-    return [];
+    console.error('Error fetching generations:', error);
+    return { validJobs: [], rawCount: 0 };
   }
 };
 
@@ -161,9 +163,14 @@ const App: React.FC = () => {
   const [isButtonDisabled, setIsButtonDisabled] = useState(false);
   const [hasSecretsFile, setHasSecretsFile] = useState(false);
   const [expandedPrompts, setExpandedPrompts] = useState<Set<string>>(new Set());
+  
+  // Smart loading state
+  const [generationBuffer, setGenerationBuffer] = useState<GenerationJob[]>([]); // All valid generations fetched
+  const [visibleGenerations, setVisibleGenerations] = useState<GenerationJob[]>([]); // Currently showing in UI
+  const [isLoadingInitial, setIsLoadingInitial] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [hasMoreGenerations, setHasMoreGenerations] = useState(true);
-  const [generationsOffset, setGenerationsOffset] = useState(0);
+  const [apiOffset, setApiOffset] = useState(0); // Leonardo API offset
+  const [hasMoreFromAPI, setHasMoreFromAPI] = useState(true);
   
   // Refs
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
@@ -189,22 +196,141 @@ const App: React.FC = () => {
     });
   };
 
+  // Load initial 10 valid generations iteratively, showing them as found
+  const loadInitialGenerations = async () => {
+    if (!apiKey || isLoadingInitial) return;
+    
+    setIsLoadingInitial(true);
+    
+    try {
+      let currentBuffer: GenerationJob[] = [];
+      let currentVisible: GenerationJob[] = [];
+      let currentOffset = 0;
+      let moreAvailable = true;
+      
+      // Keep fetching until we have 10 valid generations or run out
+      while (currentVisible.length < 10 && moreAvailable) {
+        const result = await fetchUserGenerations(apiKey, currentOffset, 10);
+        currentOffset += 10;
+        
+        // Check if Leonardo API returned fewer than requested (end of data)
+        if (result.rawCount < 10) {
+          moreAvailable = false;
+        }
+        
+        // If no valid generations found but API returned data, continue fetching
+        if (result.validJobs.length === 0 && result.rawCount > 0) {
+          continue;
+        }
+        
+        // If no raw data from API, we're done
+        if (result.rawCount === 0) {
+          moreAvailable = false;
+          break;
+        }
+        
+        // Add valid ones to buffer
+        if (result.validJobs.length > 0) {
+          currentBuffer = [...currentBuffer, ...result.validJobs];
+          
+          // Show new ones immediately (up to 10 total)
+          const needToShow = Math.min(10 - currentVisible.length, result.validJobs.length);
+          
+          if (needToShow > 0) {
+            const newVisible = result.validJobs.slice(0, needToShow);
+            currentVisible = [...currentVisible, ...newVisible];
+            setVisibleGenerations(currentVisible);
+          }
+        }
+      }
+      
+      // Update state
+      setGenerationBuffer(currentBuffer);
+      setApiOffset(currentOffset);
+      setHasMoreFromAPI(moreAvailable);
+      
+      // Pre-fetch 50 more for buffer if we can
+      if (moreAvailable) {
+        for (let i = 0; i < 5 && moreAvailable; i++) {
+          const result = await fetchUserGenerations(apiKey, currentOffset, 10);
+          currentOffset += 10;
+          
+          if (result.rawCount === 0) {
+            moreAvailable = false;
+            break;
+          }
+          
+          if (result.validJobs.length > 0) {
+            currentBuffer = [...currentBuffer, ...result.validJobs];
+          }
+          
+          if (result.rawCount < 10) {
+            moreAvailable = false;
+          }
+        }
+        
+        setGenerationBuffer(currentBuffer);
+        setApiOffset(currentOffset);
+        setHasMoreFromAPI(moreAvailable);
+      }
+      
+    } catch (error) {
+      console.error('Error loading initial generations:', error);
+    } finally {
+      setIsLoadingInitial(false);
+    }
+  };
+
+  // Load 5 more from buffer, or fetch more if buffer is low
   const loadMoreGenerations = async () => {
-    if (!apiKey || isLoadingMore || !hasMoreGenerations) return;
+    if (!apiKey || isLoadingMore) return;
     
     setIsLoadingMore(true);
     try {
-      const nextOffset = generationsOffset + 10;
-      const moreGenerations = await fetchUserGenerations(apiKey, nextOffset, 10);
+      // Get current state
+      const currentVisible = visibleGenerations.length;
+      let currentBuffer = [...generationBuffer];
+      let currentOffset = apiOffset;
+      let moreAvailable = hasMoreFromAPI;
       
-      if (moreGenerations.length === 0) {
-        setHasMoreGenerations(false);
-      } else {
-        setGenerationJobs(prev => [...prev, ...moreGenerations]);
-        setGenerationsOffset(nextOffset);
+      // If buffer is running low, fetch 50 more
+      const bufferRemaining = currentBuffer.length - currentVisible;
+      if (bufferRemaining < 10 && moreAvailable) {
+        for (let i = 0; i < 5 && moreAvailable; i++) {
+          const result = await fetchUserGenerations(apiKey, currentOffset, 10);
+          currentOffset += 10;
+          
+          if (result.rawCount === 0) {
+            moreAvailable = false;
+            break;
+          }
+          
+          if (result.validJobs.length > 0) {
+            currentBuffer = [...currentBuffer, ...result.validJobs];
+          }
+          
+          if (result.rawCount < 10) {
+            moreAvailable = false;
+          }
+        }
+        
+        // Update buffer state
+        setGenerationBuffer(currentBuffer);
+        setApiOffset(currentOffset);
+        setHasMoreFromAPI(moreAvailable);
       }
+      
+      // Show 5 more from buffer
+      const available = currentBuffer.length - currentVisible;
+      const toShow = Math.min(5, available);
+      
+      if (toShow > 0) {
+        const newVisible = currentBuffer.slice(currentVisible, currentVisible + toShow);
+        setVisibleGenerations(prev => [...prev, ...newVisible]);
+      }
+      
     } catch (error) {
-      // Silent error handling for loading more generations
+      console.error('Error loading more generations:', error);
     } finally {
       setIsLoadingMore(false);
     }
@@ -217,9 +343,13 @@ const App: React.FC = () => {
     const threshold = 100; // Load more when 100px from bottom
     
     if (scrollTop + clientHeight >= scrollHeight - threshold) {
-      loadMoreGenerations();
+      // Only load more if we have buffered generations or can fetch more
+      const hasBufferedToShow = generationBuffer.length > visibleGenerations.length;
+      if (hasBufferedToShow || hasMoreFromAPI) {
+        loadMoreGenerations();
+      }
     }
-  }, [loadMoreGenerations]);
+  }, [loadMoreGenerations, generationBuffer.length, visibleGenerations.length, hasMoreFromAPI]);
 
   // Auto-resize textarea when prompt changes
   useEffect(() => {
@@ -513,18 +643,8 @@ const App: React.FC = () => {
 
   // Load previous generations when API key becomes available
   useEffect(() => {
-    if (apiKey && generationJobs.length === 0) {
-      fetchUserGenerations(apiKey, 0, 10).then(previousJobs => {
-        if (previousJobs.length > 0) {
-          setGenerationJobs(previousJobs);
-          setGenerationsOffset(10);
-          setHasMoreGenerations(previousJobs.length === 10); // If we got 10, there might be more
-        } else {
-          setHasMoreGenerations(false);
-        }
-      }).catch(error => {
-        setHasMoreGenerations(false);
-      });
+    if (apiKey && visibleGenerations.length === 0 && !isLoadingInitial) {
+      loadInitialGenerations();
     }
   }, [apiKey]);
 
@@ -1021,7 +1141,8 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
     setGenerationJobs(prev => prev.filter(job => job.id !== jobId));
   };
 
-  const allGenerations = generationJobs.flatMap(job => job.images);
+  // Create ordered list for image viewer (newest first for UI, but correct order for viewer)
+  const allGenerations = visibleGenerations.flatMap(job => job.images);
   const hasActiveGenerations = generationJobs.some(job => job.status === 'loading' || job.status === 'enhancing');
   const isLoading = false; // No longer lock UI during generation
 
@@ -1425,7 +1546,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
           </div>
           <div className="leo-app-generations-content" ref={generationsScrollRef}>
             <div style={{ maxWidth: '64rem', margin: '0 auto' }}>
-            {generationJobs.length === 0 ? (
+            {visibleGenerations.length === 0 && !isLoadingInitial ? (
               <div style={{ textAlign: 'center', paddingTop: '48px', paddingBottom: '48px' }}>
                 <div style={{
                   width: '64px',
@@ -1449,7 +1570,18 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
               </div>
             ) : (
               <div className="leo-stack leo-stack-8">
-                {generationJobs.map((job) => (
+                {/* Show loading indicator for initial load */}
+                {isLoadingInitial && visibleGenerations.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '24px' }}>
+                    <div className="leo-spinner leo-spinner-lg" style={{ margin: '0 auto' }}></div>
+                    <p className="leo-text-sm leo-text-secondary" style={{ marginTop: '12px' }}>
+                      Loading generations...
+                    </p>
+                  </div>
+                )}
+                
+                {/* Render all visible generations */}
+                {visibleGenerations.map((job) => (
                   <div key={job.id} className="leo-generation-job">
                     {/* Job Header */}
                     <div className="leo-generation-job-header">
@@ -1616,7 +1748,7 @@ In addition, add to your response separate to <updated_prompt>, analyze the prom
                 )}
                 
                 {/* End of results indicator */}
-                {!hasMoreGenerations && generationJobs.length > 0 && (
+                {!hasMoreFromAPI && generationBuffer.length === visibleGenerations.length && visibleGenerations.length > 0 && (
                   <div style={{ textAlign: 'center', padding: '24px' }}>
                     <p className="leo-text-sm leo-text-tertiary">
                       You've reached the end of your generation history
